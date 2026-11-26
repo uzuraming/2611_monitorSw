@@ -35,7 +35,7 @@ MAIL_LIST_PATHS = [
 
 SITE_NAME = "札幌SW"
 CHECK_INTERVAL = 5          # last-menu を読む間隔 (秒)。sw4 の menu は約26秒で切り替わるので十分短く
-TIMEOUT = 240               # この秒数反応がなければ異常 (4分)
+TIMEOUT = 540               # この秒数反応がなければ異常 (9分)
 REMIND_INTERVAL = 600       # 異常継続中の再通知間隔 (秒)。0 なら再通知しない
 ALERT_COOLDOWN = 600        # 前回の警告メールからこの秒数以内の新しい異常はメールしない (鳴りすぎ防止)
                             # 抑制した異常もコンソールログと定時報告には残る。異常が続けば経過後に警告を送る
@@ -236,7 +236,7 @@ def log_block(lines=LOG_TAIL_LINES):
 
 def gaps_table(gaps):
     if not gaps:
-        return f"<p class='ok'>{TIMEOUT // 60}分を超える無反応はありません</p>"
+        return f"<p class='ok'>{fmt_dur(TIMEOUT)}を超える無反応はありません</p>"
     out = "<table><tr><th>#</th><th>無反応区間</th><th>長さ</th><th>直前</th><th>直後</th></tr>"
     for i, g in enumerate(gaps, 1):
         out += (f"<tr><td>{i}</td><td>{fmt_t(g['from'])} 〜 {fmt_t(g['to'])}</td>"
@@ -246,7 +246,7 @@ def gaps_table(gaps):
 
 
 def hourly_table(a):
-    out = "<table><tr><th>時間帯</th><th>SW反応</th><th>時報</th><th>4分超の無反応</th></tr>"
+    out = f"<table><tr><th>時間帯</th><th>SW反応</th><th>時報</th><th>{fmt_dur(TIMEOUT)}超の無反応</th></tr>"
     last_hour = a["cutoff"].hour if a["cutoff"].minute or a["cutoff"].second else a["cutoff"].hour - 1
     for hr, c in a["hourly"].items():
         if hr > last_hour:
@@ -380,7 +380,7 @@ class Monitor:
             *([("異常検知", f"{fmt_t(a['detected'])} (前回の警告から{fmt_dur(ALERT_COOLDOWN)}以内のため、通知を保留していました)")]
               if first and a["detected"] != now else []),
             ("本日の反応", f"SW {stats['sw']}回 / 時報 {stats['signal']}回 (16:00〜)"),
-            ("本日の4分超の無反応", f"{len(stats['long_gaps'])}件 (今回を含む)"),
+            (f"本日の{fmt_dur(TIMEOUT)}超の無反応", f"{len(stats['long_gaps'])}件 (今回を含む)"),
             ("status.log 最終更新", fmt_t(mtime) if mtime else "取得不可"),
             ("last-menu", h(self.last_menu_raw) if self.read_error is None
                 else f"<span class='ng'>読み取りエラー ({h(self.read_error)}) {fmt_t(self.read_error_since)}〜</span>"),
@@ -437,7 +437,7 @@ class Monitor:
             ("SW反応", f"{a['sw']}回"),
             ("時報", f"{a['signal']}回"),
             ("最長の無反応", f"{fmt_dur(mg['sec'])} ({fmt_t(mg['from'])}〜{fmt_t(mg['to'])})" if mg else "-"),
-            (f"{TIMEOUT // 60}分超の無反応",
+            (f"{fmt_dur(TIMEOUT)}超の無反応",
              f"<span class='ng'>{long_n}件</span>" if long_n else "<span class='ok'>0件</span>"),
         ]
         if a["error"]:
@@ -451,9 +451,9 @@ class Monitor:
                              f"<span class='ng'>{ACTIVE_END_HOUR}:00 時点で異常継続中 ({fmt_t(ea['since'])} から無反応)</span>"))
         inner = (kv_table(rows)
                  + "<h4>時間帯別</h4>" + hourly_table(a)
-                 + f"<h4>{TIMEOUT // 60}分を超える無反応の一覧</h4>" + gaps_table(a["long_gaps"])
+                 + f"<h4>{fmt_dur(TIMEOUT)}を超える無反応の一覧</h4>" + gaps_table(a["long_gaps"])
                  + log_block())
-        title = f"【定時報告】{SITE_NAME} {target.strftime('%m/%d %H:%M')} SW{a['sw']}回 / 4分超の無反応{long_n}件"
+        title = f"【定時報告】{SITE_NAME} {target.strftime('%m/%d %H:%M')} SW{a['sw']}回 / {fmt_dur(TIMEOUT)}超の無反応{long_n}件"
         log(f"定時報告: {title}")
         sendMail(report_recipients(cfg), title, html_page(title, inner), 0)
 
