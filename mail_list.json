@@ -1,11 +1,23 @@
 {
-    "mail_time":[
-        "17:00", "18:01", "22:01"
+    "mail_time": [
+        "16:30",
+        "18:00",
+        "20:00",
+        "22:00"
     ],
-    "log_list":[
-        {"name":"Statusログ","file_path":"/opt/2506_music/log/status.log","tail":30,"delete":false}
+    "log_list": [
+        {
+            "name": "Statusログ",
+            "file_path": "/opt/2506_music/log/status.log",
+            "tail": 30,
+            "delete": false
+        }
     ],
-    "to_mail":[
+    "to_mail": [
         "nada@zigenls.com"
+    ],
+    "alert_mail": [
+        "nada@zigenls.com",
+        "motoharu.ando@s-imf.co.jp"
     ]
 }
