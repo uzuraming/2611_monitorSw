@@ -31,6 +31,8 @@ SITE_NAME = "札幌SW"
 CHECK_INTERVAL = 5          # last-menu を読む間隔 (秒)。sw4 の menu は約26秒で切り替わるので十分短く
 TIMEOUT = 240               # この秒数反応がなければ異常 (4分)
 REMIND_INTERVAL = 600       # 異常継続中の再通知間隔 (秒)。0 なら再通知しない
+ALERT_COOLDOWN = 600        # 前回の警告メールからこの秒数以内の新しい異常はメールしない (鳴りすぎ防止)
+                            # 抑制した異常もコンソールログと定時報告には残る。異常が続けば経過後に警告を送る
 ACTIVE_START_HOUR = 16      # 監視開始 16:00
 ACTIVE_END_HOUR = 22        # 監視終了 22:00
 REPORT_DELAY = 60           # 定時報告は指定時刻の この秒数後 に送信 (時報などのログ書き込みを待つため)
@@ -244,7 +246,8 @@ class Monitor:
         self.read_error = None          # last-menu 読み取りエラー内容
         self.read_error_since = None
         self.last_menu_raw = ""
-        self.alert = None               # 異常中: {"since": datetime, "since_msg": str, "detected": datetime, "notified": datetime, "count": int}
+        self.alert = None               # 異常中: {"since", "since_msg", "detected", "notified", "count", "mailed"}
+        self.last_alert_mail = None     # 最後に警告メール(初報)を送った時刻
         self.sent_reports = set()
 
     # --- last-menu 読み取り
@@ -294,13 +297,25 @@ class Monitor:
 
         if in_window(now):
             if self.alert and event:
-                self.send_recovery(now, event)
+                if self.alert["mailed"]:
+                    self.send_recovery(now, event)
+                else:
+                    gap = (event[0] - self.alert["since"]).total_seconds()
+                    log(f"復旧 (通知なし): 無反応 {fmt_dur(gap)} {fmt_t(self.alert['since'])}〜{fmt_t(event[0])}")
                 self.alert = None
             ref_dt, ref_msg = self.reference(now)
             idle = (now - ref_dt).total_seconds()
             if self.alert is None and idle > TIMEOUT:
-                self.alert = {"since": ref_dt, "since_msg": ref_msg, "detected": now, "notified": now, "count": 1}
-                self.send_alert(now, first=True)
+                self.alert = {"since": ref_dt, "since_msg": ref_msg, "detected": now,
+                              "notified": None, "count": 0, "mailed": False}
+                if not self.cooldown_ok(now):
+                    log(f"異常 (通知抑制: 前回の警告 {fmt_t(self.last_alert_mail)} から{fmt_dur(ALERT_COOLDOWN)}以内): "
+                        f"反応なし {fmt_dur(idle)} (最終反応 {fmt_t(ref_dt)})")
+            if self.alert and not self.alert["mailed"]:
+                if self.cooldown_ok(now):
+                    self.alert.update(mailed=True, notified=now, notified_first=now, count=1)
+                    self.last_alert_mail = now
+                    self.send_alert(now, first=True)
             elif self.alert and REMIND_INTERVAL and (now - self.alert["notified"]).total_seconds() >= REMIND_INTERVAL:
                 self.alert["notified"] = now
                 self.alert["count"] += 1
@@ -310,6 +325,9 @@ class Monitor:
             self.alert = None
 
         self.check_report(now)
+
+    def cooldown_ok(self, now):
+        return self.last_alert_mail is None or (now - self.last_alert_mail).total_seconds() >= ALERT_COOLDOWN
 
     # --- メール
     def send_alert(self, now, first):
@@ -325,7 +343,9 @@ class Monitor:
             ("状態", f"<span class='ng'>SW・時報の反応が {fmt_dur(idle)} ありません</span>"),
             ("最終反応", last_str),
             ("判定基準", f"{fmt_dur(TIMEOUT)} 以上反応なしで異常"),
-            ("検知時刻", now.strftime("%Y/%m/%d %H:%M:%S") + ("" if first else f" (第{a['count']}報 / 初回 {fmt_t(a['detected'])})")),
+            ("検知時刻", now.strftime("%Y/%m/%d %H:%M:%S") + ("" if first else f" (第{a['count']}報 / 初回 {fmt_t(a['notified_first'])})")),
+            *([("異常検知", f"{fmt_t(a['detected'])} (前回の警告から{fmt_dur(ALERT_COOLDOWN)}以内のため、通知を保留していました)")]
+              if first and a["detected"] != now else []),
             ("本日の反応", f"SW {stats['sw']}回 / 時報 {stats['signal']}回 (16:00〜)"),
             ("本日の4分超の無反応", f"{len(stats['long_gaps'])}件 (今回を含む)"),
             ("status.log 最終更新", fmt_t(mtime) if mtime else "取得不可"),
