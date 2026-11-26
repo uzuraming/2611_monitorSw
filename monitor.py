@@ -12,12 +12,18 @@
 """
 import html
 import json
+import math
+import socket
 import time
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from sendMail import sendMail, DESCRIPTION
+
+# メールサーバーが応答しないときに監視ごと止まらないよう、通信の待ち時間に上限を設ける
+# (sendMail.py の SMTP_SSL はタイムアウト未指定のため、この既定値が使われる)
+socket.setdefaulttimeout(30)
 
 # ---------------------------------------------------------------- 設定
 LAST_MENU_FILE = Path("/run/2506_music/last-menu")
@@ -35,6 +41,7 @@ ALERT_COOLDOWN = 600        # 前回の警告メールからこの秒数以内�
                             # 抑制した異常もコンソールログと定時報告には残る。異常が続けば経過後に警告を送る
 ACTIVE_START_HOUR = 16      # 監視開始 16:00
 ACTIVE_END_HOUR = 22        # 監視終了 22:00
+FUTURE_TOLERANCE = 60       # last-menu の時刻がこの秒数以上未来なら、時計のずれとみなす
 REPORT_DELAY = 60           # 定時報告は指定時刻の この秒数後 に送信 (時報などのログ書き込みを待つため)
 REPORT_GRACE = 300          # 定時報告の送信猶予 (秒)。この間に送れなければその回はスキップ
 LOG_TAIL_LINES = 30
@@ -79,14 +86,26 @@ def in_window(now):
     return start <= now < end
 
 
+_config_ok = True
+
+
 def load_config():
+    global _config_ok
     for p in MAIL_LIST_PATHS:
         try:
             with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                raise ValueError("JSON がオブジェクトではありません")
+            if not _config_ok:
+                log("mail_list.json 読み取り回復")
+            _config_ok = True
+            return cfg
         except (OSError, ValueError):
             continue
-    log("mail_list.json が読めません。既定値を使用します")
+    if _config_ok:  # 読めなくなった最初の1回だけログ
+        log("mail_list.json が読めません。既定値を使用します")
+    _config_ok = False
     return {}
 
 
@@ -248,6 +267,7 @@ class Monitor:
         self.last_menu_raw = ""
         self.alert = None               # 異常中: {"since", "since_msg", "detected", "notified", "count", "mailed"}
         self.last_alert_mail = None     # 最後に警告メール(初報)を送った時刻
+        self.ended_alert = None         # 異常継続のまま監視時間が終わったときの異常
         self.sent_reports = set()
 
     # --- last-menu 読み取り
@@ -255,9 +275,14 @@ class Monitor:
         try:
             raw = LAST_MENU_FILE.read_text(encoding="utf-8")
             data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError(f"想定外の形式: {raw.strip()[:50]}")
             menu = str(data.get("menu", ""))
             dt_epoch = float(data.get("dt_epoch", 0))
-        except (OSError, ValueError, TypeError) as e:
+            if not math.isfinite(dt_epoch):
+                raise ValueError(f"dt_epoch が不正: {dt_epoch}")
+            ev_dt = datetime.fromtimestamp(dt_epoch)
+        except Exception as e:  # 中身がおかしくても監視は続ける
             if self.read_error is None:
                 self.read_error_since = now
                 log(f"last-menu 読み取りエラー: {e}")
@@ -274,7 +299,10 @@ class Monitor:
         self.seen_dt_epoch = dt_epoch
         if not is_trigger(menu):
             return None
-        ev_dt = datetime.fromtimestamp(dt_epoch)
+        if ev_dt > now + timedelta(seconds=FUTURE_TOLERANCE):
+            # 時計のずれで未来の時刻が書かれていても、反応があったことは事実なので「今」として扱う
+            log(f"last-menu の時刻が未来です ({ev_dt:%Y/%m/%d %H:%M:%S})。現在時刻として扱います")
+            ev_dt = now
         if self.last_event is None or ev_dt > self.last_event[0]:
             self.last_event = (ev_dt, menu)
             return self.last_event
@@ -291,6 +319,10 @@ class Monitor:
     # --- 1回分の処理
     def step(self, now=None):
         now = now or datetime.now()
+        if self.last_event and self.last_event[0] > now + timedelta(seconds=FUTURE_TOLERANCE):
+            # 時計が戻った場合など。未来の最終反応を基準にすると警告が出なくなるので捨てる
+            log(f"最終反応の時刻 {self.last_event[0]:%Y/%m/%d %H:%M:%S} が未来のため破棄します")
+            self.last_event = None
         event = self.poll_menu(now)
         if event:
             log(f"反応: {event[1]} ({fmt_t(event[0])})")
@@ -322,6 +354,7 @@ class Monitor:
                 self.send_alert(now, first=False)
         elif self.alert:
             log(f"監視時間終了。異常継続のまま終了 ({fmt_t(self.alert['since'])} から無反応)")
+            self.ended_alert = dict(self.alert, ended=now)  # 22:00 の定時報告に載せる
             self.alert = None
 
         self.check_report(now)
@@ -382,10 +415,10 @@ class Monitor:
         cfg = load_config()
         for t in report_times(cfg):
             try:
-                hh, mm = map(int, t.split(":"))
-            except ValueError:
-                continue
-            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                hh, mm = map(int, str(t).split(":"))
+                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            except (ValueError, TypeError):
+                continue  # 不正な時刻は飛ばし、他の時刻の報告は続ける
             key = target.strftime("%Y/%m/%d %H:%M")
             if key in self.sent_reports:
                 continue
@@ -411,6 +444,11 @@ class Monitor:
             rows.append(("エラー", f"<span class='ng'>{h(a['error'])}</span>"))
         if self.alert:
             rows.append(("現在の状態", f"<span class='ng'>異常継続中 ({fmt_t(self.alert['since'])} から無反応)</span>"))
+        else:
+            ea = self.ended_alert
+            if ea and ea["ended"].date() == target.date() and target >= window_of(target)[1]:
+                rows.append(("監視終了時の状態",
+                             f"<span class='ng'>{ACTIVE_END_HOUR}:00 時点で異常継続中 ({fmt_t(ea['since'])} から無反応)</span>"))
         inner = (kv_table(rows)
                  + "<h4>時間帯別</h4>" + hourly_table(a)
                  + f"<h4>{TIMEOUT // 60}分を超える無反応の一覧</h4>" + gaps_table(a["long_gaps"])
