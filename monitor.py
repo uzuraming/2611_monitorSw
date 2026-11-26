@@ -33,6 +33,7 @@ TIMEOUT = 240               # この秒数反応がなければ異常 (4分)
 REMIND_INTERVAL = 600       # 異常継続中の再通知間隔 (秒)。0 なら再通知しない
 ACTIVE_START_HOUR = 16      # 監視開始 16:00
 ACTIVE_END_HOUR = 22        # 監視終了 22:00
+REPORT_DELAY = 60           # 定時報告は指定時刻の この秒数後 に送信 (時報などのログ書き込みを待つため)
 REPORT_GRACE = 300          # 定時報告の送信猶予 (秒)。この間に送れなければその回はスキップ
 LOG_TAIL_LINES = 30
 
@@ -368,12 +369,14 @@ class Monitor:
             key = target.strftime("%Y/%m/%d %H:%M")
             if key in self.sent_reports:
                 continue
-            if target <= now < target + timedelta(seconds=REPORT_GRACE):
+            send_at = target + timedelta(seconds=REPORT_DELAY)
+            if send_at <= now < send_at + timedelta(seconds=REPORT_GRACE):
                 self.sent_reports.add(key)
-                self.send_report(now, cfg)
+                self.send_report(target, cfg)
 
-    def send_report(self, now, cfg):
-        a = analyze(now)
+    def send_report(self, target, cfg):
+        """target: 報告の基準時刻 (mail_time)。集計は target まで、送信は REPORT_DELAY 秒後"""
+        a = analyze(target)
         long_n = len(a["long_gaps"])
         mg = a["max_gap"]
         rows = [
@@ -392,7 +395,7 @@ class Monitor:
                  + "<h4>時間帯別</h4>" + hourly_table(a)
                  + f"<h4>{TIMEOUT // 60}分を超える無反応の一覧</h4>" + gaps_table(a["long_gaps"])
                  + log_block())
-        title = f"【定時報告】{SITE_NAME} {now.strftime('%m/%d %H:%M')} SW{a['sw']}回 / 4分超の無反応{long_n}件"
+        title = f"【定時報告】{SITE_NAME} {target.strftime('%m/%d %H:%M')} SW{a['sw']}回 / 4分超の無反応{long_n}件"
         log(f"定時報告: {title}")
         sendMail(report_recipients(cfg), title, html_page(title, inner), 0)
 
