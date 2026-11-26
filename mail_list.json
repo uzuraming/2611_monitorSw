@@ -1,0 +1,11 @@
+{
+    "mail_time":[
+        "17:00", "18:01", "22:01"
+    ],
+    "log_list":[
+        {"name":"Statusログ","file_path":"/opt/2506_music/log/status.log","tail":30,"delete":false}
+    ],
+    "to_mail":[
+        "nada@zigenls.com"
+    ]
+}
